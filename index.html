@@ -271,6 +271,31 @@
   .inv-chip:active{transform:scale(.97)}
   .inv-filter-pill{display:inline-flex;align-items:center;gap:6px;background:rgba(255,178,107,.15);color:var(--accent,#ffb26b);border:1px solid rgba(255,178,107,.4);border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600}
   .inv-filter-pill button{background:none;border:0;color:inherit;cursor:pointer;font-size:14px;line-height:1;padding:0;margin-left:2px}
+  /* Deletion walkdown — items triaged 'Delete' grouped by shelf */
+  .walk-shelf{position:sticky;top:0;background:var(--panel);z-index:5;
+    padding:10px 12px;margin:14px -12px 6px;border-top:1px solid var(--border);
+    border-bottom:1px solid var(--border);font-weight:700;font-size:14px;
+    display:flex;align-items:baseline;gap:8px}
+  .walk-shelf .walk-shelf-code{font-size:16px}
+  .walk-shelf .walk-shelf-count{font-size:12px;color:var(--muted);font-weight:500}
+  .walk-row{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--border);
+    background:#0f0f0f;border-radius:10px;padding:10px;margin-bottom:8px;
+    transition:opacity .25s ease}
+  .walk-row.done{opacity:.45}
+  .walk-row.done .walk-name{text-decoration:line-through}
+  .walk-thumb{width:54px;height:54px;border-radius:8px;background:#1c1c1c center/cover no-repeat;
+    flex:0 0 auto;border:1px solid var(--border);cursor:zoom-in}
+  .walk-thumb.empty{display:flex;align-items:center;justify-content:center;
+    color:var(--muted);font-size:9px;cursor:default}
+  .walk-thumb.empty::before{content:'no img'}
+  .walk-body{flex:1;min-width:0}
+  .walk-name{font-size:15px;font-weight:600;line-height:1.3}
+  .walk-meta{font-size:12px;color:var(--muted);margin-top:3px;display:flex;gap:6px;flex-wrap:wrap}
+  .walk-comment{font-size:12px;color:var(--text);margin-top:4px;font-style:italic}
+  .walk-actions{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+  .walk-actions button{font-size:13px;padding:7px 12px;white-space:nowrap}
+  .walk-done-pill{font-size:11px;color:var(--ok,#7fd47f);background:rgba(120,200,140,.10);
+    border:1px solid rgba(120,200,140,.30);border-radius:999px;padding:4px 10px;font-weight:600}
   /* Two-tile top-level mode picker (Storage / Event day) */
   .mode-tile{display:flex;align-items:center;gap:14px;text-align:left;padding:18px 16px;font-size:16px;line-height:1.3}
   .mode-tile .mode-tile-emoji{font-size:28px;line-height:1;flex:0 0 auto}
@@ -302,7 +327,7 @@
     </div>
     <div class="card switchboard stack">
       <h2>Where are you?</h2>
-      <button class="primary mode-tile" onclick="show('screen-mode-storage');refreshReturnsQueueBadge()">
+      <button class="primary mode-tile" onclick="show('screen-mode-storage');refreshStorageBadges()">
         <span class="mode-tile-emoji">📦</span>
         <span>
           <strong>Storage</strong>
@@ -328,7 +353,24 @@
       <button onclick="openReturnsQueue()">↩ Returns to sort <span id="returns-queue-badge" class="muted" style="margin-left:6px;font-size:12px"></span></button>
       <button onclick="startMode('create')">Create Order</button>
       <button onclick="startMode('triage')">Keep It or Delete It</button>
+      <button onclick="openWalkdown()">🗑 Deletion walkdown <span id="walkdown-badge" class="muted" style="margin-left:6px;font-size:12px"></span></button>
       <button class="ghost" onclick="show('screen-session')">Back</button>
+    </div>
+  </section>
+
+  <!-- DELETION WALKDOWN — physically remove items previously triaged 'Delete' -->
+  <section id="screen-walkdown" class="screen">
+    <div class="card stack">
+      <h1>🗑 Deletion walkdown</h1>
+      <p class="muted" style="margin-top:0;font-size:13px">
+        Items marked <strong>Delete</strong> in triage, grouped by shelf so you can walk one bay at a time. Tap <strong>Dispose</strong> as each item leaves the warehouse — it'll disappear from this list and stay disposed in the sheet.
+      </p>
+      <div id="walkdown-summary" class="muted" style="font-size:13px"></div>
+      <div id="walkdown-list"></div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="ghost" onclick="renderWalkdown()" style="flex:1">Refresh</button>
+        <button class="ghost" onclick="show('screen-mode-storage')" style="flex:1">Back</button>
+      </div>
     </div>
   </section>
 
@@ -4583,6 +4625,147 @@ async function refreshReturnsQueueBadge(){
     const res = await fetch(url, { method:'GET', cache:'no-store' });
     const data = await res.json();
     if (data && data.success) updateReturnsQueueBadge((data.returns || []).length);
+  } catch (_) {}
+}
+
+// Refresh both Storage-submenu badges at once. Called whenever we
+// land on the Storage tile so the user sees the current state without
+// drilling in.
+function refreshStorageBadges(){
+  refreshReturnsQueueBadge();
+  refreshWalkdownBadge();
+}
+
+// ── Deletion walkdown ──
+// Drives the "🗑 Deletion walkdown" screen: a shelf-by-shelf list of
+// everything triaged Delete that hasn't yet been physically removed.
+// Items disappear from the list once disposed (server writes
+// DisposedAt + DisposedBy, idempotent so two phones can't race).
+async function openWalkdown(){
+  show('screen-walkdown');
+  await renderWalkdown();
+}
+
+async function renderWalkdown(){
+  const host = document.getElementById('walkdown-list');
+  const summary = document.getElementById('walkdown-summary');
+  if (!host) return;
+  host.innerHTML = '<div class="muted" style="font-size:13px;padding:10px 0">Loading…</div>';
+  if (summary) summary.textContent = '';
+  try {
+    const url = ENDPOINT + '?action=deletionWalkdown&_=' + Date.now();
+    const res = await fetch(url, { method:'GET', cache:'no-store' });
+    const data = await res.json();
+    if (!data || !data.success){
+      host.innerHTML = '<div class="err-line">Could not load list.</div>';
+      return;
+    }
+    const shelves = data.shelves || [];
+    const total = data.count || 0;
+    updateWalkdownBadge(total);
+    if (!total){
+      host.innerHTML = '<div class="muted" style="padding:14px 4px">Nothing to dispose — list is clear ✓</div>';
+      if (summary) summary.textContent = '';
+      return;
+    }
+    if (summary) summary.textContent =
+      total + ' item' + (total === 1 ? '' : 's') + ' across ' +
+      shelves.length + ' shelf' + (shelves.length === 1 ? '' : 'es') + '.';
+    host.innerHTML = shelves.map(s => {
+      const items = s.items.map(it => renderWalkRow(it)).join('');
+      return `
+        <div class="walk-shelf">
+          <span class="walk-shelf-code">${_esc(s.shelf)}</span>
+          <span class="walk-shelf-count">${s.items.length} item${s.items.length === 1 ? '' : 's'}</span>
+        </div>
+        ${items}`;
+    }).join('');
+  } catch (e) {
+    host.innerHTML = '<div class="err-line">Network error.</div>';
+  }
+}
+
+function renderWalkRow(it){
+  const thumb = it.thumbUrl
+    ? `<div class="walk-thumb" style="background-image:url('${_esc(it.thumbUrl)}')" onclick="openPhotoLightbox('${_esc(it.thumbUrl)}','${_esc(it.name || '')}')"></div>`
+    : `<div class="walk-thumb empty"></div>`;
+  const brandLine = it.brand ? `${_esc(it.brand)} · ` : '';
+  const qty = it.totalQty ? ` · qty ${_esc(String(it.totalQty))}` : '';
+  const decidedBy = it.decidedBy ? ` · ${_esc(it.decidedBy)}` : '';
+  return `
+    <div class="walk-row" data-row="${it.rowIdx}">
+      ${thumb}
+      <div class="walk-body">
+        <div class="walk-name">${_esc(it.name || '(unnamed)')}</div>
+        <div class="walk-meta">${brandLine}${_esc(it.type || '')}${qty}</div>
+        <div class="walk-meta">Triaged Delete${decidedBy}</div>
+        ${it.comment ? `<div class="walk-comment">"${_esc(it.comment)}"</div>` : ''}
+      </div>
+      <div class="walk-actions">
+        <button class="small primary" onclick="disposeWalkItem(${it.rowIdx}, this)">✓ Dispose</button>
+      </div>
+    </div>`;
+}
+
+async function disposeWalkItem(rowIdx, btn){
+  const row = document.querySelector(`.walk-row[data-row="${rowIdx}"]`);
+  // Optimistic UI — strike + fade immediately, swap button for a pill.
+  if (row) row.classList.add('done');
+  if (btn) { btn.disabled = true; btn.textContent = 'Disposing…'; }
+  try {
+    const res = await directPost('disposeItem', { rowIdx: rowIdx, team: state.team || '' });
+    if (!res || !res.success){
+      if (row) row.classList.remove('done');
+      if (btn){ btn.disabled = false; btn.textContent = '✓ Dispose'; }
+      toast((res && res.error) || 'Could not dispose.');
+      return;
+    }
+    // Replace the row with a quiet "Disposed" pill, then prune it on
+    // next render. Leaving it visible (struck through) is helpful so
+    // the user sees their progress without the list jumping around.
+    const actions = row && row.querySelector('.walk-actions');
+    if (actions){
+      const who = res.disposedBy ? ' by ' + res.disposedBy : '';
+      actions.innerHTML = `<span class="walk-done-pill">Disposed${_esc(who)}</span>`;
+    }
+    // Decrement counts in the summary + shelf header + badge.
+    const summary = document.getElementById('walkdown-summary');
+    const remaining = document.querySelectorAll('#walkdown-list .walk-row:not(.done)').length;
+    updateWalkdownBadge(remaining);
+    if (summary && remaining >= 0){
+      // Recompute shelves with remaining items so the line is honest.
+      const shelvesLeft = new Set();
+      document.querySelectorAll('#walkdown-list .walk-row:not(.done)').forEach(r => {
+        const hdr = r.previousElementSibling;
+        // Walk back to nearest .walk-shelf
+        let p = r.previousElementSibling;
+        while (p && !p.classList.contains('walk-shelf')) p = p.previousElementSibling;
+        if (p) shelvesLeft.add(p.textContent);
+      });
+      summary.textContent = remaining
+        ? remaining + ' item' + (remaining === 1 ? '' : 's') + ' left across ' +
+          shelvesLeft.size + ' shelf' + (shelvesLeft.size === 1 ? '' : 'es') + '.'
+        : 'All done ✓';
+    }
+    toast(res.alreadyDisposed ? 'Already disposed' : 'Disposed');
+  } catch (e) {
+    if (row) row.classList.remove('done');
+    if (btn){ btn.disabled = false; btn.textContent = '✓ Dispose'; }
+    toast('Network error — try again.');
+  }
+}
+
+function updateWalkdownBadge(count){
+  const el = document.getElementById('walkdown-badge');
+  if (!el) return;
+  el.textContent = count > 0 ? '(' + count + ')' : '';
+}
+async function refreshWalkdownBadge(){
+  try {
+    const url = ENDPOINT + '?action=deletionWalkdown&_=' + Date.now();
+    const res = await fetch(url, { method:'GET', cache:'no-store' });
+    const data = await res.json();
+    if (data && data.success) updateWalkdownBadge(data.count || 0);
   } catch (_) {}
 }
 
