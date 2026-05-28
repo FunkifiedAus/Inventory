@@ -262,15 +262,25 @@
   .dmg-sev{display:flex;gap:6px}
   .dmg-sev button.small{flex:1;padding:8px;font-size:12px}
   .dmg-sev button.small.sel{background:var(--err);color:#fff;border-color:var(--err)}
-  /* Search screen — Browse by Brands / Categories chips */
+  /* Search screen — column-scoped search */
+  .search-row{display:flex;gap:8px;align-items:stretch}
+  .search-row select{flex:0 0 130px;padding:10px;background:#0f0f0f;color:var(--text);
+    border:1px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit}
+  .search-row input{flex:1;min-width:0}
   .inv-browse{margin:6px 0 4px 0}
-  .inv-browse h3{font-size:13px;font-weight:600;color:var(--muted);margin:10px 0 6px 0;text-transform:uppercase;letter-spacing:.05em}
+  .inv-browse h3{font-size:12px;font-weight:600;color:var(--muted);margin:8px 0 6px 0;
+    text-transform:uppercase;letter-spacing:.05em}
   .inv-browse h3:first-child{margin-top:0}
   .inv-chip-row{display:flex;gap:6px;flex-wrap:wrap}
-  .inv-chip{padding:6px 12px;border-radius:999px;border:1px solid var(--border);background:#0f0f0f;color:var(--text);font-size:13px;font-family:inherit;cursor:pointer}
+  .inv-chip{padding:6px 12px;border-radius:999px;border:1px solid var(--border);background:#0f0f0f;
+    color:var(--text);font-size:13px;font-family:inherit;cursor:pointer}
   .inv-chip:active{transform:scale(.97)}
-  .inv-filter-pill{display:inline-flex;align-items:center;gap:6px;background:rgba(255,178,107,.15);color:var(--accent,#ffb26b);border:1px solid rgba(255,178,107,.4);border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600}
-  .inv-filter-pill button{background:none;border:0;color:inherit;cursor:pointer;font-size:14px;line-height:1;padding:0;margin-left:2px}
+  .inv-chip.sel{background:rgba(255,178,107,.18);border-color:rgba(255,178,107,.55);color:var(--accent,#ffb26b);font-weight:600}
+  .inv-filter-pill{display:inline-flex;align-items:center;gap:6px;background:rgba(255,178,107,.15);
+    color:var(--accent,#ffb26b);border:1px solid rgba(255,178,107,.4);border-radius:999px;
+    padding:4px 10px;font-size:12px;font-weight:600}
+  .inv-filter-pill button{background:none;border:0;color:inherit;cursor:pointer;font-size:14px;
+    line-height:1;padding:0;margin-left:2px}
   /* Deletion walkdown — items triaged 'Delete' grouped by shelf */
   .walk-shelf{position:sticky;top:0;background:var(--panel);z-index:5;
     padding:10px 12px;margin:14px -12px 6px;border-top:1px solid var(--border);
@@ -349,10 +359,11 @@
     <div class="card switchboard stack">
       <h1>📦 Storage</h1>
       <p class="muted" style="margin-top:0;font-size:13px">Warehouse, manifest and put-away.</p>
-      <button class="primary" onclick="startMode('sort')">Search Manifest</button>
+      <button class="primary" onclick="startMode('sort')">🔍 Search manifest</button>
+      <button onclick="browseNoTag()">➕ Add new item</button>
       <button onclick="openReturnsQueue()">↩ Returns to sort <span id="returns-queue-badge" class="muted" style="margin-left:6px;font-size:12px"></span></button>
-      <button onclick="startMode('create')">Create Order</button>
-      <button onclick="startMode('triage')">Keep It or Delete It</button>
+      <button onclick="startMode('create')">Create order</button>
+      <button onclick="startMode('triage')">🆕 Check new inventory</button>
       <button onclick="openWalkdown()">🗑 Deletion walkdown <span id="walkdown-badge" class="muted" style="margin-left:6px;font-size:12px"></span></button>
       <button class="ghost" onclick="show('screen-session')">Back</button>
     </div>
@@ -442,7 +453,7 @@
     </div>
   </section>
 
-  <!-- BROWSE — search inventory -->
+  <!-- BROWSE — search inventory (column-scoped) -->
   <section id="screen-browse" class="screen">
     <div class="shelf-bind-banner">
       <span>Bound to shelf <span class="shelf-code"></span></span>
@@ -450,21 +461,27 @@
     </div>
     <div class="card stack">
       <h1>Search manifest</h1>
-      <p class="muted">Search by item name, shelf code, brand or type. Partial words are fine.</p>
-      <div class="field">
+      <p class="muted" style="font-size:13px;margin-top:0">
+        Pick a column to scope the search. For brand, category or location, tap a chip to fill it in.
+      </p>
+      <div class="search-row">
+        <select id="inv-search-col" onchange="onSearchColChange()">
+          <option value="all">All fields</option>
+          <option value="name">Name</option>
+          <option value="brand">Brand</option>
+          <option value="type">Category</option>
+          <option value="shelf">Shelf</option>
+          <option value="city">Location</option>
+        </select>
         <input id="inv-search" type="search" autocomplete="off" autocapitalize="off"
-               placeholder="e.g. candle, B1, NRMAi" oninput="searchInventory(this.value)"/>
+               placeholder="Type to search…" oninput="searchInventory(this.value)"/>
       </div>
-      <!-- Active filter chip — shown when a brand or category chip is
-           selected. Tap × to clear and return to all results. -->
-      <div id="inv-active-filter" class="muted" style="display:none;font-size:13px;margin-top:-4px;margin-bottom:4px"></div>
-      <!-- Browse chips — visible only when the search input is empty
-           AND no filter is active. Tapping a chip filters results. -->
+      <!-- Chip rail — only renders for enumerable scopes (brand/type/city)
+           when the input is empty. Tap a chip → fills the input + searches. -->
       <div id="inv-browse" class="inv-browse"></div>
       <div id="inv-results" class="stack"></div>
     </div>
     <div class="card stack">
-      <button onclick="browseNoTag()">Add a new item</button>
       <button class="ghost" onclick="show('screen-session')">Back</button>
     </div>
   </section>
@@ -1208,11 +1225,11 @@
     </div>
   </section>
 
-  <!-- KEEP IT OR DELETE IT -->
+  <!-- CHECK NEW INVENTORY (triage) -->
   <section id="screen-triage" class="screen">
     <div class="card">
-      <h1>Keep it or delete it</h1>
-      <p class="muted" style="font-size:13px"><span data-team-display>—</span> · One vote per item — Keep or Delete locks it in for the whole team. Skip moves it to the back of your queue.</p>
+      <h1>🆕 Check new inventory</h1>
+      <p class="muted" style="font-size:13px"><span data-team-display>—</span> · Each item is new and needs a decision: <strong>Keep</strong> it on the books or mark it to <strong>Delete</strong>. Skip moves it to the back of your queue.</p>
       <div id="triage-progress" class="muted" style="font-size:13px;margin-top:4px"></div>
     </div>
     <div id="triage-card" class="card stack"></div>
@@ -1681,13 +1698,14 @@ function startMode(mode){
   if(!state.team){toast('Pick a name first');return;}
   state.mode=mode; saveSession();
   if(mode==='sort'){
-    // Clear any filter from a previous session + paint the browse chips
-    // so the pre-search state is useful immediately.
-    _searchFilter = null;
+    // Reset the search screen: column back to 'All fields', input empty,
+    // results cleared. The chip rail will only paint if the user picks
+    // an enumerable column.
+    _searchCol = 'all';
+    const sel = document.getElementById('inv-search-col'); if (sel) sel.value = 'all';
     const inp = document.getElementById('inv-search'); if (inp) inp.value = '';
     const res = document.getElementById('inv-results'); if (res) res.innerHTML = '';
     show('screen-browse');
-    renderActiveFilter();
     renderBrowseChips();
   }
   else if(mode==='loadout')show('screen-loadout-setup');
@@ -1720,7 +1738,14 @@ const _listCache = {
   brands: { data: null, promise: null, lastErr: '', action: 'inventoryBrands', responseKey: 'brands',
             promptEmpty: '— pick a brand —',    addLabel: '+ Add new brand…',
             placeholderNew: 'New brand name (e.g. Funkified)',
-            humanSingular: 'brand', humanPlural: 'brands' }
+            humanSingular: 'brand', humanPlural: 'brands' },
+  // Cities — read-only enumeration of warehouse locations, used by the
+  // search screen's Location chip rail. No add/new flow because cities
+  // are auto-assigned from scan GPS, not user-entered.
+  cities: { data: null, promise: null, lastErr: '', action: 'inventoryCities', responseKey: 'items',
+            promptEmpty: '— pick a location —', addLabel: '',
+            placeholderNew: '',
+            humanSingular: 'location', humanPlural: 'locations' }
 };
 
 function invalidateListCache(){
@@ -1728,11 +1753,13 @@ function invalidateListCache(){
   // promise from before a save would still resolve to the old list.
   _listCache.types.data  = null;  _listCache.types.promise  = null;  _listCache.types.lastErr = '';
   _listCache.brands.data = null;  _listCache.brands.promise = null;  _listCache.brands.lastErr = '';
+  _listCache.cities.data = null;  _listCache.cities.promise = null;  _listCache.cities.lastErr = '';
   // Immediately re-warm in the background so the NEXT picker open is
   // instant — the user just typed a new brand/category, and that's
   // exactly when they're about to register another item.
   fetchKnownList('types').catch(()=>{});
   fetchKnownList('brands').catch(()=>{});
+  fetchKnownList('cities').catch(()=>{});
 }
 
 async function fetchKnownList(kind, force){
@@ -2967,22 +2994,31 @@ function browseNoTag(){
   buildListPicker('notag-brand', 'brands', 'Funkified');
 }
 
-/* ---------- Inventory search (word-boundary + filters) ---------- */
+/* ---------- Inventory search (column-scoped) ----------
+   Single dropdown picks a column; results word-boundary-match against
+   only that column (or all when scope='all'). For enumerable columns
+   (brand / type / city) the screen shows the distinct values as chips
+   while the input is empty — tap a chip to fill the input + search.
+*/
 let _searchDebounce = null;
 let _lastSearchItems = [];
-// Currently-active filter from the browse chips. null when no filter
-// is set; otherwise {kind:'brand'|'type', value:'Funkified'}. The free-
-// text input stacks on top of this — e.g. "candle" + brand:Funkified.
-let _searchFilter = null;
+// Currently-selected column. Mirrors the <select id="inv-search-col">.
+let _searchCol = 'all';
+
+function onSearchColChange(){
+  const sel = document.getElementById('inv-search-col');
+  _searchCol = sel ? sel.value : 'all';
+  const input = document.getElementById('inv-search');
+  renderBrowseChips();
+  searchInventory(input ? input.value : '');
+}
 
 function searchInventory(q){
   clearTimeout(_searchDebounce);
   const host = document.getElementById('inv-results');
   const term = (q || '').trim();
-  // Whenever the input changes, hide the browse chips iff there's
-  // typed text — but keep them visible while only the filter is on.
   renderBrowseChips();
-  if (!term && !_searchFilter){
+  if (!term){
     host.innerHTML = '';
     _lastSearchItems = [];
     return;
@@ -2991,49 +3027,13 @@ function searchInventory(q){
   _searchDebounce = setTimeout(() => runSearch(term), 220);
 }
 
-function setSearchFilter(kind, value){
-  _searchFilter = (kind && value) ? { kind, value } : null;
-  renderActiveFilter();
-  renderBrowseChips();
-  // Trigger search using whatever's currently in the text box.
-  const input = document.getElementById('inv-search');
-  searchInventory(input ? input.value : '');
-}
-
-function clearSearchFilter(){
-  setSearchFilter(null, null);
-}
-
-function renderActiveFilter(){
-  const host = document.getElementById('inv-active-filter');
-  if (!host) return;
-  if (!_searchFilter){ host.style.display = 'none'; host.innerHTML = ''; return; }
-  const label = _searchFilter.kind === 'brand' ? 'Brand' : 'Category';
-  host.style.display = '';
-  host.innerHTML = `Filtering by <span class="inv-filter-pill">${label}: ${_esc(_searchFilter.value)}<button onclick="clearSearchFilter()" aria-label="clear">×</button></span>`;
-}
-
-// Compose the query that goes to the server: free text + filter prefix.
-function _composedQuery(term){
-  const bits = [];
-  if (_searchFilter && _searchFilter.kind === 'brand'){
-    const v = _searchFilter.value;
-    bits.push('brand:' + (/\s/.test(v) ? `"${v}"` : v));
-  }
-  if (_searchFilter && _searchFilter.kind === 'type'){
-    const v = _searchFilter.value;
-    bits.push('type:'  + (/\s/.test(v) ? `"${v}"` : v));
-  }
-  if (term) bits.push(term);
-  return bits.join(' ');
-}
-
 async function runSearch(term){
   const host = document.getElementById('inv-results');
-  const composed = _composedQuery(term);
-  if (!composed){ host.innerHTML = ''; _lastSearchItems = []; return; }
+  if (!term){ host.innerHTML = ''; _lastSearchItems = []; return; }
   try {
-    const url = ENDPOINT + '?action=search&q=' + encodeURIComponent(composed);
+    const url = ENDPOINT + '?action=search'
+      + '&q=' + encodeURIComponent(term)
+      + '&col=' + encodeURIComponent(_searchCol || 'all');
     const res = await fetch(url, { method:'GET' });
     const data = await res.json();
     if (!data || data.success === false){
@@ -3048,37 +3048,49 @@ async function runSearch(term){
   }
 }
 
-// Pre-search chip rows — pulled from the same cache the brand/category
-// pickers use, so they're warmed on app boot and the chips render
-// instantly. Hidden once the user starts typing or sets a filter.
+// Per-column chip rail. Visible only when the input is empty AND the
+// chosen column is enumerable (brand / type / city). Tapping a chip
+// fills the input with that value and runs a scoped search — so
+// "show me everything from NRMA" is two taps, not a typed query.
 function renderBrowseChips(){
   const host = document.getElementById('inv-browse');
   if (!host) return;
   const input = document.getElementById('inv-search');
   const hasText = input && input.value.trim();
-  if (hasText || _searchFilter){
+  // Map scope → which cache feeds the chip rail.
+  const CHIP_KINDS = { brand: 'brands', type: 'types', city: 'cities' };
+  const kind = CHIP_KINDS[_searchCol];
+  if (hasText || !kind){
     host.style.display = 'none';
     host.innerHTML = '';
     return;
   }
   host.style.display = '';
-  // _listCache is populated by fetchKnownList (brands/types). If empty,
-  // kick off a warm-up fetch and re-render when it arrives.
-  const brands = (_listCache.brands.data || []);
-  const types  = (_listCache.types.data  || []);
-  if (!brands.length){ fetchKnownList('brands').then(() => renderBrowseChips()).catch(() => {}); }
-  if (!types.length ){ fetchKnownList('types').then(() => renderBrowseChips()).catch(() => {}); }
-  const brandChips = brands.length
-    ? brands.map(b => `<button type="button" class="inv-chip" onclick="setSearchFilter('brand', ${JSON.stringify(b)})">${_esc(b)}</button>`).join('')
-    : `<div class="muted" style="font-size:12px">No brands logged yet.</div>`;
-  const typeChips = types.length
-    ? types.map(t => `<button type="button" class="inv-chip" onclick="setSearchFilter('type', ${JSON.stringify(t)})">${_esc(t)}</button>`).join('')
-    : `<div class="muted" style="font-size:12px">No categories logged yet.</div>`;
+  const values = (_listCache[kind] && _listCache[kind].data) || [];
+  if (!values.length){
+    // Warm cache and re-render when it arrives.
+    fetchKnownList(kind).then(() => renderBrowseChips()).catch(() => {});
+    host.innerHTML = `<div class="muted" style="font-size:12px">Loading ${_esc(_listCache[kind].humanPlural || kind)}…</div>`;
+    return;
+  }
+  const titleMap = { brand: 'Pick a brand', type: 'Pick a category', city: 'Pick a location' };
+  const chips = values.map(v =>
+    `<button type="button" class="inv-chip" onclick="pickSearchChip(${JSON.stringify(v)})">${_esc(v)}</button>`
+  ).join('');
   host.innerHTML = `
-    <h3>Browse by brand</h3>
-    <div class="inv-chip-row">${brandChips}</div>
-    <h3>Browse by category</h3>
-    <div class="inv-chip-row">${typeChips}</div>`;
+    <h3>${_esc(titleMap[_searchCol] || 'Pick a value')}</h3>
+    <div class="inv-chip-row">${chips}</div>`;
+}
+
+// Chip tap → fill the input with the exact value + run a scoped search.
+function pickSearchChip(value){
+  const input = document.getElementById('inv-search');
+  if (input){
+    input.value = value;
+    // Move keyboard focus away so mobile doesn't pop up a keyboard.
+    input.blur();
+  }
+  searchInventory(value);
 }
 
 function renderSearchResults(items){
@@ -4934,6 +4946,7 @@ async function init(){
   // own retry link surfaces them when a form actually opens.
   fetchKnownList('types').catch(()=>{});
   fetchKnownList('brands').catch(()=>{});
+  fetchKnownList('cities').catch(()=>{});
   // Reflect any pinned event from a previous session onto the Event
   // Day primary button so users see the event name immediately.
   updateEventDayPinLabel();
