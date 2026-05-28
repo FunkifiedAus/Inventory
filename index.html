@@ -263,10 +263,14 @@
   .dmg-sev button.small{flex:1;padding:8px;font-size:12px}
   .dmg-sev button.small.sel{background:var(--err);color:#fff;border-color:var(--err)}
   /* Search screen — column-scoped search */
-  .search-row{display:flex;gap:8px;align-items:stretch}
-  .search-row select{flex:0 0 130px;padding:10px;background:#0f0f0f;color:var(--text);
+  .search-row{display:flex;gap:8px;align-items:stretch;flex-wrap:wrap}
+  .search-row select{flex:1 1 140px;min-width:0;padding:10px;background:#0f0f0f;color:var(--text);
     border:1px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit}
-  .search-row input{flex:1;min-width:0}
+  .search-row input{flex:1 1 160px;min-width:0}
+  .search-row #inv-search-col{flex:0 0 100%;max-width:none}
+  @media (min-width: 480px){
+    .search-row #inv-search-col{flex:0 0 150px}
+  }
   .inv-browse{margin:6px 0 4px 0}
   .inv-browse h3{font-size:12px;font-weight:600;color:var(--muted);margin:8px 0 6px 0;
     text-transform:uppercase;letter-spacing:.05em}
@@ -466,19 +470,23 @@
       </p>
       <div class="search-row">
         <select id="inv-search-col" onchange="onSearchColChange()">
-          <option value="all">All fields</option>
-          <option value="name">Name</option>
-          <option value="brand">Brand</option>
-          <option value="type">Category</option>
-          <option value="shelf">Shelf</option>
-          <option value="city">Location</option>
+          <option value="all">Search all fields</option>
+          <option value="name">By name</option>
+          <option value="brand">By brand</option>
+          <option value="type">By category</option>
+          <option value="shelf">By shelf</option>
+          <option value="city">By location</option>
         </select>
+        <!-- Free text input — visible for All / Name / Shelf scopes. -->
         <input id="inv-search" type="search" autocomplete="off" autocapitalize="off"
                placeholder="Type to search…" oninput="searchInventory(this.value)"/>
+        <!-- Value dropdown — visible for enumerable scopes (Brand / Category /
+             Location). Populated from the same cache the form pickers use, so
+             it renders the moment the user lands on the screen. -->
+        <select id="inv-search-value" style="display:none" onchange="onSearchValueChange()">
+          <option value="">— pick one —</option>
+        </select>
       </div>
-      <!-- Chip rail — only renders for enumerable scopes (brand/type/city)
-           when the input is empty. Tap a chip → fills the input + searches. -->
-      <div id="inv-browse" class="inv-browse"></div>
       <div id="inv-results" class="stack"></div>
     </div>
     <div class="card stack">
@@ -1699,14 +1707,14 @@ function startMode(mode){
   state.mode=mode; saveSession();
   if(mode==='sort'){
     // Reset the search screen: column back to 'All fields', input empty,
-    // results cleared. The chip rail will only paint if the user picks
-    // an enumerable column.
+    // value dropdown hidden + reset, results cleared.
     _searchCol = 'all';
     const sel = document.getElementById('inv-search-col'); if (sel) sel.value = 'all';
     const inp = document.getElementById('inv-search'); if (inp) inp.value = '';
+    const vsel = document.getElementById('inv-search-value'); if (vsel) vsel.value = '';
     const res = document.getElementById('inv-results'); if (res) res.innerHTML = '';
     show('screen-browse');
-    renderBrowseChips();
+    _renderValueControl();
   }
   else if(mode==='loadout')show('screen-loadout-setup');
   else if(mode==='delivery')show('screen-delivery-setup');
@@ -2995,29 +3003,102 @@ function browseNoTag(){
 }
 
 /* ---------- Inventory search (column-scoped) ----------
-   Single dropdown picks a column; results word-boundary-match against
-   only that column (or all when scope='all'). For enumerable columns
-   (brand / type / city) the screen shows the distinct values as chips
-   while the input is empty — tap a chip to fill the input + search.
+   Column dropdown picks WHICH column to match against. When the column
+   is enumerable (brand / type / city) the value control becomes a
+   second native dropdown listing the distinct values — pick a value
+   and the search runs scoped to that column. When the column is
+   text-based (all / name / shelf) the value control is a text input.
+
+   Using native <select> dropdowns for the value picker (rather than
+   custom-rendered chip buttons) sidesteps every PWA / mobile / event-
+   handling quirk — a native select is always clickable.
 */
 let _searchDebounce = null;
 let _lastSearchItems = [];
 // Currently-selected column. Mirrors the <select id="inv-search-col">.
 let _searchCol = 'all';
+// Which scopes use the value dropdown (vs the text input).
+const _ENUMERABLE_SCOPES = { brand: 'brands', type: 'types', city: 'cities' };
 
 function onSearchColChange(){
   const sel = document.getElementById('inv-search-col');
   _searchCol = sel ? sel.value : 'all';
+  _renderValueControl();
+  // If we just switched to an enumerable scope, the value select kicks
+  // off the search via its own onchange. If we switched to a free-text
+  // scope, re-run search with whatever's in the input (likely empty).
   const input = document.getElementById('inv-search');
-  renderBrowseChips();
-  searchInventory(input ? input.value : '');
+  if (_ENUMERABLE_SCOPES[_searchCol]) {
+    // Clear results until the user picks a value.
+    document.getElementById('inv-results').innerHTML = '';
+    _lastSearchItems = [];
+  } else {
+    searchInventory(input ? input.value : '');
+  }
+}
+
+// Show the text input OR the value dropdown depending on the column.
+// Populates the dropdown from the cache; warms it if empty.
+function _renderValueControl(){
+  const input = document.getElementById('inv-search');
+  const valSel = document.getElementById('inv-search-value');
+  if (!input || !valSel) return;
+  const kind = _ENUMERABLE_SCOPES[_searchCol];
+  if (!kind){
+    // Free-text scope: show input, hide value dropdown.
+    input.style.display = '';
+    valSel.style.display = 'none';
+    return;
+  }
+  // Enumerable scope: hide input, show + populate dropdown.
+  input.style.display = 'none';
+  input.value = '';
+  valSel.style.display = '';
+  _populateValueSelect(kind);
+}
+
+function _populateValueSelect(kind){
+  const valSel = document.getElementById('inv-search-value');
+  if (!valSel) return;
+  const slot = _listCache[kind];
+  const values = (slot && slot.data) || [];
+  const labelMap = { brands: 'a brand', types: 'a category', cities: 'a location' };
+  const opening = `<option value="">— pick ${labelMap[kind] || 'one'} —</option>`;
+  if (!values.length){
+    valSel.innerHTML = opening + '<option value="" disabled>(loading…)</option>';
+    // Warm the cache and re-populate when it arrives. If the cache
+    // came back empty (e.g. no rows have City yet), the dropdown will
+    // just show the placeholder + loading row, which is honest.
+    fetchKnownList(kind).then(() => {
+      // Only repopulate if we're still on the same scope.
+      if (_ENUMERABLE_SCOPES[_searchCol] === kind) _populateValueSelect(kind);
+    }).catch(() => {});
+    return;
+  }
+  valSel.innerHTML = opening + values.map(v =>
+    `<option value="${_esc(v)}">${_esc(v)}</option>`
+  ).join('');
+  valSel.value = '';
+}
+
+// Value dropdown changed → run a scoped search with the picked value.
+// Empty selection clears the results.
+function onSearchValueChange(){
+  const valSel = document.getElementById('inv-search-value');
+  const v = (valSel ? valSel.value : '').trim();
+  if (!v){
+    document.getElementById('inv-results').innerHTML = '';
+    _lastSearchItems = [];
+    return;
+  }
+  // Bypass debounce — the user just made an explicit choice.
+  runSearch(v);
 }
 
 function searchInventory(q){
   clearTimeout(_searchDebounce);
   const host = document.getElementById('inv-results');
   const term = (q || '').trim();
-  renderBrowseChips();
   if (!term){
     host.innerHTML = '';
     _lastSearchItems = [];
@@ -3048,50 +3129,10 @@ async function runSearch(term){
   }
 }
 
-// Per-column chip rail. Visible only when the input is empty AND the
-// chosen column is enumerable (brand / type / city). Tapping a chip
-// fills the input with that value and runs a scoped search — so
-// "show me everything from NRMA" is two taps, not a typed query.
-function renderBrowseChips(){
-  const host = document.getElementById('inv-browse');
-  if (!host) return;
-  const input = document.getElementById('inv-search');
-  const hasText = input && input.value.trim();
-  // Map scope → which cache feeds the chip rail.
-  const CHIP_KINDS = { brand: 'brands', type: 'types', city: 'cities' };
-  const kind = CHIP_KINDS[_searchCol];
-  if (hasText || !kind){
-    host.style.display = 'none';
-    host.innerHTML = '';
-    return;
-  }
-  host.style.display = '';
-  const values = (_listCache[kind] && _listCache[kind].data) || [];
-  if (!values.length){
-    // Warm cache and re-render when it arrives.
-    fetchKnownList(kind).then(() => renderBrowseChips()).catch(() => {});
-    host.innerHTML = `<div class="muted" style="font-size:12px">Loading ${_esc(_listCache[kind].humanPlural || kind)}…</div>`;
-    return;
-  }
-  const titleMap = { brand: 'Pick a brand', type: 'Pick a category', city: 'Pick a location' };
-  const chips = values.map(v =>
-    `<button type="button" class="inv-chip" onclick="pickSearchChip(${JSON.stringify(v)})">${_esc(v)}</button>`
-  ).join('');
-  host.innerHTML = `
-    <h3>${_esc(titleMap[_searchCol] || 'Pick a value')}</h3>
-    <div class="inv-chip-row">${chips}</div>`;
-}
-
-// Chip tap → fill the input with the exact value + run a scoped search.
-function pickSearchChip(value){
-  const input = document.getElementById('inv-search');
-  if (input){
-    input.value = value;
-    // Move keyboard focus away so mobile doesn't pop up a keyboard.
-    input.blur();
-  }
-  searchInventory(value);
-}
+// Legacy stub — replaced by _renderValueControl which uses a native
+// <select> instead of clickable chips. Kept so existing callers (e.g.
+// startMode) keep working without changes.
+function renderBrowseChips(){ _renderValueControl(); }
 
 function renderSearchResults(items){
   const host = document.getElementById('inv-results');
