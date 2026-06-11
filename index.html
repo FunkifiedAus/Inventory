@@ -314,6 +314,8 @@
   .mode-tile{display:flex;align-items:center;gap:14px;text-align:left;padding:18px 16px;font-size:16px;line-height:1.3}
   .mode-tile .mode-tile-emoji{font-size:28px;line-height:1;flex:0 0 auto}
   .mode-tile .mode-tile-sub{font-size:12px;color:rgba(0,0,0,.55);font-weight:500;margin-top:2px}
+  /* FIX: kill the 300ms double-tap-to-zoom delay on tappable controls */
+  button, .pack-tick, .inv-chip, .stepper button { touch-action: manipulation; }
 </style>
 </head>
 <body>
@@ -1228,7 +1230,8 @@
     </div>
     <div class="card stack">
       <div id="return-summary" class="muted" style="font-size:13px"></div>
-      <button class="primary" id="btn-return-submit" onclick="submitReturn()">Submit returns</button>
+      <!-- FIX: call renamed submitOrderReturns (was shadowed by single-item submitReturn) -->
+      <button class="primary" id="btn-return-submit" onclick="submitOrderReturns()">Submit returns</button>
       <button class="ghost" onclick="show('screen-return-picker')">Back to orders</button>
     </div>
   </section>
@@ -1322,7 +1325,9 @@ const state = {
   shelfBind:null, gps:null
 };
 
-function toast(msg, ms=2400){
+function toast(msg, opts){
+  // FIX: some call sites pass `true` as the 2nd arg meaning "sticky error" — show those for 6000ms
+  const ms = opts === true ? 6000 : (typeof opts === 'number' ? opts : 2400);
   const t=document.getElementById('toast');
   t.textContent=msg; t.classList.add('show');
   clearTimeout(toast._t);
@@ -1478,8 +1483,10 @@ function retakePhoto(previewId){
 }
 
 /* ---------- Enqueue + Drain ---------- */
-async function enqueue(action,payload){
-  const env=buildEnvelope(action,payload);
+async function enqueue(action,payload,prebuiltEnv){
+  // FIX: optional prebuilt envelope lets callers reuse a clientId minted
+  // before a direct-post attempt, so retries can't double-register.
+  const env=prebuiltEnv||buildEnvelope(action,payload);
   await idbPut(STORE_OUTBOX,env);
   updatePendingChip();
   drainOutbox().catch(()=>{});
@@ -1826,13 +1833,14 @@ async function buildListPicker(rootId, kind, currentValue){
   // master list yet (e.g. legacy item with an old spelling) — so we
   // don't silently nuke its value when the picker first renders.
   const merged = [...list];
-  if (cur && !merged.some(v => v.toLowerCase() === cur.toLowerCase())) {
+  // FIX: list values can be numbers (e.g. numeric brands/types) — String() them before .toLowerCase()
+  if (cur && !merged.some(v => String(v).toLowerCase() === cur.toLowerCase())) {
     merged.unshift(cur);
   }
   const esc = s => String(s==null?'':s).replace(/[&<>"']/g,
     c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const optHtml = merged.map(v => {
-    const sel = v.toLowerCase() === cur.toLowerCase() ? 'selected' : '';
+    const sel = String(v).toLowerCase() === cur.toLowerCase() ? 'selected' : '';
     return `<option value="${esc(v)}" ${sel}>${esc(v)}</option>`;
   }).join('');
   // Status line: tells the user (and me, debugging) how many entries
@@ -1953,7 +1961,7 @@ async function loadTriageList(){
     const res = await fetch(url, { method:'GET' });
     const data = await res.json();
     if (!data || data.success === false){
-      if (card) card.innerHTML = '<div class="err-line">'+((data&&data.error)||'Could not load list')+'</div>';
+      if (card) card.innerHTML = '<div class="err-line">'+_esc((data&&data.error)||'Could not load list')+'</div>'; // FIX: escape server error string
       return;
     }
     _triageQueue = (data.items || []).filter(it => _triageDecided.indexOf(it.rowIdx) === -1);
@@ -2170,6 +2178,13 @@ function triageDecide(decision){
 async function triageSubmit_(it, decision, comment){
   _triageInflight++;
   updateTriageProgress();
+  // FIX: on submit failure, put the item back at the front of the queue so the vote isn't silently lost
+  const restoreItem = () => {
+    const di = _triageDecided.indexOf(it.rowIdx);
+    if (di !== -1) _triageDecided.splice(di, 1);
+    _triageQueue.unshift(it);
+    renderTriage();
+  };
   try {
     const res = await directPost('triageDecide', {
       rowIdx:   it.rowIdx,
@@ -2182,6 +2197,7 @@ async function triageSubmit_(it, decision, comment){
     if (!res || res.success === false){
       _triageFailures++;
       toast((res && res.error) || ('Save failed: ' + (it.name||it.rowIdx)), true);
+      restoreItem();
     } else if (res.alreadyDecided){
       // Someone else got there first — not really a failure, but worth
       // surfacing so the user knows their vote wasn't the one that stuck.
@@ -2191,6 +2207,7 @@ async function triageSubmit_(it, decision, comment){
   } catch (_) {
     _triageFailures++;
     toast('Network error on ' + (it.name||'item') + ' — vote may not have saved', true);
+    restoreItem(); // FIX: re-queue the item on network failure too
   } finally {
     _triageInflight--;
     updateTriageProgress();
@@ -2258,7 +2275,7 @@ function searchCreate(q){
       const res = await fetch(url, { method:'GET' });
       const data = await res.json();
       if (!data || data.success === false){
-        host.innerHTML = '<div class="err-line">'+((data&&data.error)||'Search failed')+'</div>';
+        host.innerHTML = '<div class="err-line">'+_esc((data&&data.error)||'Search failed')+'</div>'; // FIX: escape server error string
         return;
       }
       createOrderState.lastResults = data.items || [];
@@ -2389,7 +2406,7 @@ async function loadReturnableJobs(){
   try {
     const res = await directPost('returnsList', { team: state.team || '' });
     console.log('[Funkified] returnsList response:', res);
-    if (!res || !res.success){ host.innerHTML = '<div class="err-line">'+((res&&res.error)||'Could not load')+'</div>'; return; }
+    if (!res || !res.success){ host.innerHTML = '<div class="err-line">'+_esc((res&&res.error)||'Could not load')+'</div>'; return; } // FIX: escape server error string
     const jobs = res.jobs || [];
     if (!jobs.length){ host.innerHTML = '<div class="muted">Nothing to return right now.</div>'; return; }
     const esc = s => String(s==null?'':s).replace(/[&<>"']/g,
@@ -2424,7 +2441,7 @@ async function selectReturnJob(orderId){
     // Reuse jobPack — it has the line items, photos, shelves, and counts.
     const res = await directPost('jobPack', { orderId, team: state.team || '' });
     console.log('[Funkified] jobPack(return) response:', res);
-    if (!res || !res.success){ if (host) host.innerHTML = '<div class="err-line">'+((res&&res.error)||'Could not load')+'</div>'; return; }
+    if (!res || !res.success){ if (host) host.innerHTML = '<div class="err-line">'+_esc((res&&res.error)||'Could not load')+'</div>'; return; } // FIX: escape server error string
     const items = (res.items || []).map(it => Object.assign({}, it, {
       // Returnable = packed - already-returned. Server already did the
       // "qtyOutstanding" math for packing — for returns we need fresh
@@ -2632,7 +2649,8 @@ function updateReturnSummary(){
     : (totalLocal + ' of ' + totalOnJob + ' units ticked · ' + remaining + ' remaining');
 }
 
-async function submitReturn(){
+// FIX: renamed from submitReturn — duplicate declaration clashed with the single-item submitReturn below
+async function submitOrderReturns(){
   if (!returnState.job){ toast('No order loaded'); return; }
   const items = returnState.job.items;
   const returns = items
@@ -2714,7 +2732,7 @@ async function loadPendingJobs(){
   try {
     const res = await directPost('jobsPending', { team: state.team || '' });
     if (!res || !res.success) {
-      host.innerHTML = '<div class="err-line">'+((res&&res.error)||'Could not load jobs')+'</div>';
+      host.innerHTML = '<div class="err-line">'+_esc((res&&res.error)||'Could not load jobs')+'</div>'; // FIX: escape server error string
       return;
     }
     renderPackPicker(res.jobs || []);
@@ -2777,7 +2795,7 @@ async function selectPackJob(orderId){
     const res = await directPost('jobPack', { orderId, team: state.team || '' });
     console.log('[Funkified] jobPack response:', res);
     if (!res || !res.success){
-      if (host) host.innerHTML = '<div class="err-line">'+((res&&res.error)||'Could not load')+'</div>';
+      if (host) host.innerHTML = '<div class="err-line">'+_esc((res&&res.error)||'Could not load')+'</div>'; // FIX: escape server error string
       return;
     }
     state.packJob = {
@@ -2795,7 +2813,7 @@ async function selectPackJob(orderId){
   } catch(e) {
     console.error('[Funkified] jobPack failed:', e);
     if (host) host.innerHTML = '<div class="err-line">Could not load: '+
-      ((e && e.message) ? e.message : 'network/timeout — open the dev console for details')+'</div>';
+      _esc((e && e.message) ? e.message : 'network/timeout — open the dev console for details')+'</div>'; // FIX: escape error string
   }
 }
 
@@ -3118,7 +3136,7 @@ async function runSearch(term){
     const res = await fetch(url, { method:'GET' });
     const data = await res.json();
     if (!data || data.success === false){
-      host.innerHTML = '<div class="err-line">'+((data&&data.error)||'Search failed')+'</div>';
+      host.innerHTML = '<div class="err-line">'+_esc((data&&data.error)||'Search failed')+'</div>'; // FIX: escape server error string
       _lastSearchItems = [];
       return;
     }
@@ -3200,7 +3218,9 @@ async function submitManualShelf(){
   const v=(document.getElementById('manual-shelf')||{}).value?.trim()?.toUpperCase();
   if(!v){toast('Enter a shelf code');return;}
   state.currentShelf=v;
-  lookupAndRoute(v).catch(()=>{prefillNewShelf(v);show('screen-new');});
+  // FIX: a network error is not "shelf doesn't exist" — don't open the
+  // new-item form (which invites duplicate shelves); just surface the error.
+  lookupAndRoute(v).catch(()=>{toast("Couldn't check shelf — network error. Try again.", true);});
 }
 function prefillNewShelf(shelf){
   const f=document.getElementById('new-shelf'); if(f)f.value=shelf;
@@ -3230,7 +3250,9 @@ async function lookupAndRoute(shelf){
     }
     showShelfPicker(shelf, items);
   } catch(_) {
-    prefillNewShelf(shelf); show('screen-new');
+    // FIX: network/fetch failure ≠ "not found" — stay put and tell the user
+    // instead of opening the new-item form (deliberate offline path above is unchanged).
+    toast("Couldn't check shelf — network error. Try again.", true);
   }
 }
 
@@ -3318,22 +3340,31 @@ function renderExistingItem(item){
    behaviour for "20 silver bollards on D1".
 ----------------------------------- */
 async function registerItem(payload, kind){
+  // FIX: mint the envelope (and its clientId) ONCE so the direct post and
+  // the queue fallback share the same clientId — a timeout retry after a
+  // post that actually landed can no longer double-register.
+  const env = buildEnvelope(kind, payload);
   if (!navigator.onLine) {
-    await enqueue(kind, payload);
+    await enqueue(kind, payload, env);
     return { queued:true };
   }
   try {
-    const res = await directPost(kind, payload);
+    // payload's clientId (placed first here) wins over directPost's own uuid().
+    const res = await directPost(kind, Object.assign({ clientId: env.clientId }, payload));
     if (res && res.success) return res;
     return res || { success:false, error:'Unknown error' };
   } catch (_) {
-    // Network error → fall back to queue.
-    await enqueue(kind, payload);
+    // Network error → fall back to queue with the SAME envelope/clientId.
+    await enqueue(kind, payload, env);
     return { queued:true };
   }
 }
 
 async function submitNew(){
+  // FIX: double-submit guard — disable the submit button while the request is in flight
+  const btn = document.querySelector('button[onclick="submitNew()"]');
+  if (btn) btn.disabled = true;
+  try {
   const shelf=((document.getElementById('new-shelf')||{}).value||'').trim().toUpperCase();
   const name=(document.getElementById('new-name')||{}).value?.trim();
   if (listPickerHasUnfilledNew('new-brand')){ toast('Type the new brand name first'); return; }
@@ -3358,6 +3389,9 @@ async function submitNew(){
   // next dropdown shows it.
   invalidateListCache();
   show('screen-success');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function submitNoTag(){
@@ -3365,6 +3399,10 @@ async function submitNoTag(){
   // getShelfBind() here — the input already gets filled by
   // renderShelfBanners() when a bind is active, and that's visible to the
   // user. So whatever is in the textbox is what the user actually sees.
+  // FIX: double-submit guard — disable the submit button while the request is in flight
+  const btn = document.querySelector('button[onclick="submitNoTag()"]');
+  if (btn) btn.disabled = true;
+  try {
   const shelf=((document.getElementById('notag-shelf')||{}).value||'').trim().toUpperCase();
   const name=(document.getElementById('notag-name')||{}).value?.trim();
   if (listPickerHasUnfilledNew('notag-brand')){ toast('Type the new brand name first'); return; }
@@ -3392,6 +3430,9 @@ async function submitNoTag(){
   const qtyEl=document.getElementById('notag-qty'); if(qtyEl)qtyEl.value=1;
   const photoEl=document.getElementById('notag-photo'); if(photoEl){photoEl.style.display='none';photoEl.src='';}
   show('screen-success');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 // itemKey() returns the keys we send to pin a row server-side. rowIdx is
 // the strongest handle (survives shelf moves and renames); shelf+name is
@@ -3405,11 +3446,18 @@ function itemKey(){
   };
 }
 async function submitTakeOut(){
+  // FIX: double-submit guard — disable the submit button while the request is in flight
+  const btn = document.querySelector('button[onclick="submitTakeOut()"]');
+  if (btn) btn.disabled = true;
+  try {
   const qty=Math.max(1,parseInt((document.getElementById('takeout-qty')||{}).value)||1);
   const reason=(document.getElementById('takeout-reason')||{}).value?.trim();
   await enqueue('takeOut',Object.assign({},itemKey(),{qty,reason,team:state.team||'',ts:nowIso()}));
   toast('Queued take-out ×'+qty);
   show('screen-success');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 async function submitLoad(){
   const qty=Math.max(1,parseInt((document.getElementById('load-qty')||{}).value)||1);
@@ -3450,6 +3498,10 @@ function resetStandaloneDamageForm(){
   const ph = document.getElementById('damage-photo'); if (ph) ph.src = '';
 }
 async function submitDamage(){
+  // FIX: double-submit guard — disable the submit button while the request is in flight
+  const btn = document.querySelector('button[onclick="submitDamage()"]');
+  if (btn) btn.disabled = true;
+  try {
   const desc=(document.getElementById('damage-desc')||{}).value?.trim();
   const qty = Math.max(1, parseInt((document.getElementById('damage-qty')||{}).value,10) || 1);
   if(!desc){toast('Describe the damage');return;}
@@ -3461,6 +3513,9 @@ async function submitDamage(){
   resetStandaloneDamageForm();
   toast('Queued damage report');
   show('screen-success');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ─────────── Incident reporting ───────────
@@ -3549,6 +3604,10 @@ function resetIncidentForm(){
 }
 
 async function submitIncident(){
+  // FIX: double-submit guard — disable the submit button while the request is in flight
+  const btn = document.querySelector('button[onclick="submitIncident()"]');
+  if (btn) btn.disabled = true;
+  try {
   const desc = (document.getElementById('inc-description')||{}).value?.trim();
   const person = (document.getElementById('inc-person')||{}).value?.trim();
   // Minimal validation: description is the one field we genuinely need.
@@ -3592,6 +3651,9 @@ async function submitIncident(){
   resetIncidentForm();
   toast('Incident report queued — alert email will fire when synced');
   show('screen-success');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ─────────── Event induction ───────────
@@ -4055,6 +4117,10 @@ async function openInductionForm(){
 }
 
 async function submitInduction(){
+  // FIX: double-submit guard — disable the submit button while the request is in flight
+  const btn = document.querySelector('button[onclick="submitInduction()"]');
+  if (btn) btn.disabled = true;
+  try {
   const val = id => ((document.getElementById(id) || {}).value || '').trim();
   const chk = id => !!(document.getElementById(id) || {}).checked;
   const sel = document.querySelector('#ind-event-picker select');
@@ -4106,6 +4172,9 @@ async function submitInduction(){
   state.pendingPhoto = null;
   toast('Inducted — confirmation email will fire when synced');
   show('screen-success');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ─────────── In-event panel ───────────
@@ -4441,11 +4510,6 @@ function renderEvpManifest(){
     // hidden (it'd be confusing — the item's already on its way back).
     const ret = m.returned || null;
     const isPacked = m.checked && !ret;
-    const itemJson = JSON.stringify(m.item);
-    const qtyJson  = JSON.stringify(m.qty || 1);
-    const invName  = (inv && inv.name) || '';
-    const invRow   = (inv && inv.rowIdx) || 0;
-    const defaultShelf = (inv && inv.shelf) ? inv.shelf : '';
 
     let actionHtml = '';
     if (ret) {
@@ -4455,10 +4519,13 @@ function renderEvpManifest(){
         actionHtml = `<div class="evp-manifest-status pending">↩ Returned to ${_esc(ret.returnToShelf || '—')} · awaiting sort</div>`;
       }
     } else {
+      // FIX: don't inject JSON.stringify output into single-quoted onclick
+      // attributes (breaks on apostrophes, XSS on crafted names) — pass the
+      // manifest index instead and look the row up from _evpEvent.manifest.
       const packBtn = isPacked
         ? `<div class="evp-manifest-status packed">📦 Packed${m.packedBy ? ' by ' + _esc(m.packedBy) : ''}</div>`
-        : `<button class="small" onclick='packManifestItem(${m.rowNumber}, ${itemJson}, ${qtyJson}, ${JSON.stringify(invName)}, ${invRow}, this)'>📦 Pack</button>`;
-      const returnBtn = `<button class="small" onclick='openReturnModal(${m.rowNumber}, ${itemJson}, ${qtyJson}, ${JSON.stringify(defaultShelf)}, ${JSON.stringify(invName)}, ${invRow})'>↩ Return to storage</button>`;
+        : `<button class="small" data-midx="${i}" onclick="packManifestItemAt(${i}, this)">📦 Pack</button>`;
+      const returnBtn = `<button class="small" data-midx="${i}" onclick="openReturnModalAt(${i})">↩ Return to storage</button>`;
       actionHtml = `<div class="evp-manifest-actions">${packBtn}${returnBtn}</div>`;
     }
 
@@ -4475,6 +4542,23 @@ function renderEvpManifest(){
         </div>
       </div>`;
   }).join('');
+}
+
+// FIX: index-based lookups for the manifest action buttons — replaces the
+// old JSON-into-onclick-attribute injection. Behavior is identical.
+function packManifestItemAt(i, btn){
+  const m = ((_evpEvent && _evpEvent.manifest) || [])[i];
+  if (!m) return;
+  const inv = m.inventoryMatch;
+  packManifestItem(m.rowNumber, m.item, m.qty || 1,
+    (inv && inv.name) || '', (inv && inv.rowIdx) || 0, btn);
+}
+function openReturnModalAt(i){
+  const m = ((_evpEvent && _evpEvent.manifest) || [])[i];
+  if (!m) return;
+  const inv = m.inventoryMatch;
+  openReturnModal(m.rowNumber, m.item, m.qty || 1,
+    (inv && inv.shelf) ? inv.shelf : '', (inv && inv.name) || '', (inv && inv.rowIdx) || 0);
 }
 
 // ── Return modal ──
@@ -4910,7 +4994,7 @@ async function renderPendingList(){
     const ago=mins?`${mins}m ${secs}s ago`:`${secs}s ago`;
     const label=env.status==='failed'?'FAILED':(env.status==='in_flight'?'SENDING':'QUEUED');
     const cls=env.status==='failed'?'pill pill-err':(env.status==='in_flight'?'pill pill-warn':'pill');
-    const err=env.lastError?`<div class="err-line">${env.lastError}</div>`:'';
+    const err=env.lastError?`<div class="err-line">${_esc(env.lastError)}</div>`:''; // FIX: escape server-supplied error text
     const isConflict = env.serverResponse && env.serverResponse.conflict;
     const extraBtn = isConflict
       ? `<button onclick="overwriteEnvelope('${env.clientId}')">Overwrite & retry</button>`
@@ -4927,14 +5011,15 @@ async function renderPendingList(){
   }).join('');
 }
 function summarizePayload(env){
+  // FIX: HTML-escape all user-supplied values before interpolating into innerHTML
   const p=env.payload||{},bits=[];
-  if(p.shelf) bits.push(`Shelf: <code>${p.shelf}</code>`);
-  if(p.name) bits.push(`Name: ${p.name}`);
-  if(p.type) bits.push(`Type: ${p.type}`);
-  if(p.qty) bits.push(`Qty: ${p.qty}`);
-  if(p.jobName) bits.push(`Job: ${p.jobName}`);
-  if(p.to||p.from) bits.push(`${p.from||'?'} → ${p.to||'?'}`);
-  if(p.description) bits.push(`Damage: ${p.description}`);
+  if(p.shelf) bits.push(`Shelf: <code>${_esc(p.shelf)}</code>`);
+  if(p.name) bits.push(`Name: ${_esc(p.name)}`);
+  if(p.type) bits.push(`Type: ${_esc(p.type)}`);
+  if(p.qty) bits.push(`Qty: ${_esc(p.qty)}`);
+  if(p.jobName) bits.push(`Job: ${_esc(p.jobName)}`);
+  if(p.to||p.from) bits.push(`${_esc(p.from||'?')} → ${_esc(p.to||'?')}`);
+  if(p.description) bits.push(`Damage: ${_esc(p.description)}`);
   if(p.photo) bits.push(`<span class="muted">+photo</span>`);
   return bits.join(' · ');
 }
