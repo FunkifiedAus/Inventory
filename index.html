@@ -369,6 +369,8 @@
       <button onclick="browseNoTag()">➕ Add new item</button>
       <button onclick="openReturnsQueue()">↩ Returns to sort <span id="returns-queue-badge" class="muted" style="margin-left:6px;font-size:12px"></span></button>
       <button onclick="startMode('create')">Create order</button>
+      <button onclick="openApproveQueue()">✅ Approve orders <span id="approve-queue-badge" class="muted" style="margin-left:6px;font-size:12px"></span></button>
+      <button onclick="startMode('pack')">📦 Pack a client order <span id="pack-queue-badge" class="muted" style="margin-left:6px;font-size:12px"></span></button>
       <button onclick="startMode('triage')">🆕 Check new inventory</button>
       <button onclick="openWalkdown()">🗑 Deletion walkdown <span id="walkdown-badge" class="muted" style="margin-left:6px;font-size:12px"></span></button>
       <button class="ghost" onclick="show('screen-session')">Back</button>
@@ -1128,14 +1130,29 @@
     </div>
   </section>
 
+  <!-- APPROVE CLIENT ORDERS — Pending → Scheduled -->
+  <section id="screen-approve-list" class="screen">
+    <div class="card stack">
+      <h1>✅ Approve orders</h1>
+      <p class="muted" style="margin-top:0;font-size:13px">
+        Pending client orders waiting to be scheduled. Approving an order moves it to
+        <strong>Scheduled</strong> so it appears in “Pack a client order”. Once approved,
+        the client can no longer edit it from the portal.
+      </p>
+      <div id="approve-jobs" class="stack"></div>
+      <button class="ghost" onclick="loadOrdersToApprove()">Refresh</button>
+      <button class="ghost" onclick="show('screen-mode-storage')">Back</button>
+    </div>
+  </section>
+
   <!-- PACK A CLIENT ORDER — job picker -->
   <section id="screen-pack-picker" class="screen">
     <div class="card stack">
       <h1>Pack a client order</h1>
-      <p class="muted">Scheduled orders ready to pack. Pending orders are still being edited by the client and don't appear here.</p>
+      <p class="muted">Scheduled orders ready to pack. Pending orders are still being edited by the client and don't appear here — approve them first via “Approve orders”.</p>
       <div id="pack-jobs" class="stack"></div>
       <button class="ghost" onclick="loadPendingJobs()">Refresh</button>
-      <button class="ghost" onclick="show('screen-session')">Back</button>
+      <button class="ghost" onclick="show('screen-mode-storage')">Back</button>
     </div>
   </section>
 
@@ -2701,6 +2718,101 @@ async function submitOrderReturns(){
   }
 }
 
+/* ---------- Approve-client-order flow (Pending → Scheduled) ----------
+   Pending portal orders don't appear in the pack list until a warehouse
+   user approves them here. Approve flips every Pending line to Scheduled
+   (server-side), after which the order shows in "Pack a client order"
+   and the client can no longer edit it from the portal.
+*/
+async function openApproveQueue(){
+  show('screen-approve-list');
+  await loadOrdersToApprove();
+}
+async function loadOrdersToApprove(){
+  const host = document.getElementById('approve-jobs');
+  if (host) host.innerHTML = '<div class="muted">Loading…</div>';
+  try {
+    const res = await directPost('ordersToApprove', { team: state.team || '' });
+    if (!res || !res.success){
+      if (host) host.innerHTML = '<div class="err-line">'+_esc((res&&res.error)||'Could not load')+'</div>';
+      return;
+    }
+    renderApproveList(res.jobs || []);
+  } catch(_) {
+    if (host) host.innerHTML = '<div class="err-line">Network error. Tap Refresh.</div>';
+  }
+}
+function renderApproveList(jobs){
+  const host = document.getElementById('approve-jobs');
+  if (!host) return;
+  updateApproveBadge(jobs.length);
+  if (!jobs.length){
+    host.innerHTML = '<div class="muted">No pending orders waiting for approval.</div>';
+    return;
+  }
+  host.innerHTML = jobs.map(j => {
+    const meta = j.meta || {};
+    const title = j.jobName || j.orderId;
+    const origin = j.origin || 'Portal';
+    const originCls = origin === 'Internal' ? 'origin-internal' : '';
+    const originPill = origin === 'Internal' ? 'internal' : 'portal';
+    const placedBy = j.placedBy ? `<div><span class="muted">Placed by:</span> ${_esc(j.placedBy)}</div>` : '';
+    return `
+      <div class="pending-item ${originCls}">
+        <div class="pending-row">
+          <span class="pill-origin ${originPill}">${_esc(origin)}</span>
+          <span class="pill pill-warn">Pending</span>
+          <strong>${_esc(title)}</strong>
+        </div>
+        <div class="pending-body">
+          <div><span class="muted">Client:</span> ${_esc(j.client||'—')}</div>
+          <div><span class="muted">Drop-off:</span> ${_esc(fmtDate(meta.dropoffWhen))}</div>
+          ${placedBy}
+          <div><span class="muted">Items:</span> ${j.lineCount} lines · ${j.unitsOrdered} units</div>
+        </div>
+        <div class="pending-actions">
+          <button class="primary" onclick="approvePendingOrder('${_esc(j.orderId)}', this)">✅ Approve → Schedule</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+async function approvePendingOrder(orderId, btn){
+  if (!confirm('Approve this order? It moves to Scheduled and becomes packable. The client can no longer edit it from the portal.')) return;
+  if (btn){ btn.disabled = true; btn.textContent = 'Approving…'; }
+  try {
+    const res = await directPost('approveOrder', { orderId, team: state.team || '' });
+    if (!res || !res.success){
+      if (btn){ btn.disabled = false; btn.textContent = '✅ Approve → Schedule'; }
+      toast((res && res.error) || 'Approve failed', true);
+      return;
+    }
+    toast('Approved — now in the pack list');
+    await loadOrdersToApprove();
+    refreshPackBadge();
+  } catch(_) {
+    if (btn){ btn.disabled = false; btn.textContent = '✅ Approve → Schedule'; }
+    toast('Network error — try again', true);
+  }
+}
+function updateApproveBadge(count){
+  const el = document.getElementById('approve-queue-badge');
+  if (el) el.textContent = count > 0 ? '(' + count + ')' : '';
+}
+async function refreshApproveBadge(){
+  try {
+    const res = await directPost('ordersToApprove', { team: state.team || '' });
+    if (res && res.success) updateApproveBadge((res.jobs || []).length);
+  } catch(_) {}
+}
+async function refreshPackBadge(){
+  try {
+    const res = await directPost('jobsPending', { team: state.team || '' });
+    if (res && res.success){
+      const el = document.getElementById('pack-queue-badge');
+      if (el){ const n = (res.jobs || []).length; el.textContent = n > 0 ? '(' + n + ')' : ''; }
+    }
+  } catch(_) {}
+}
 /* ---------- Pack-a-client-order helpers ---------- */
 async function directPost(action, payload){
   const body = Object.assign({ clientId: uuid(), action }, payload || {});
@@ -4771,6 +4883,8 @@ async function refreshReturnsQueueBadge(){
 function refreshStorageBadges(){
   refreshReturnsQueueBadge();
   refreshWalkdownBadge();
+  refreshApproveBadge();
+  refreshPackBadge();
 }
 
 // ── Deletion walkdown ──
