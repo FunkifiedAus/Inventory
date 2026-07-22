@@ -5,7 +5,7 @@
    - Passes through POSTs and external endpoints without touching them.
    - Supports skipWaiting on demand.
 */
-const VERSION = 'funkified-v43-2026-06-11-hardening';
+const VERSION = 'funkified-v44-2026-07-22-finish-queue';
 const APP_SHELL = [
   './',
   './index.html',
