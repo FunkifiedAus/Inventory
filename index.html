@@ -372,6 +372,7 @@
       <button onclick="openApproveQueue()">✅ Approve orders <span id="approve-queue-badge" class="muted" style="margin-left:6px;font-size:12px"></span></button>
       <button onclick="startMode('pack')">📦 Pack a client order <span id="pack-queue-badge" class="muted" style="margin-left:6px;font-size:12px"></span></button>
       <button onclick="startMode('triage')">🆕 Check new inventory</button>
+      <button onclick="startMode('finish')">🧩 Finish incomplete items <span id="finish-badge" class="muted" style="margin-left:6px;font-size:12px"></span></button>
       <button onclick="openWalkdown()">🗑 Deletion walkdown <span id="walkdown-badge" class="muted" style="margin-left:6px;font-size:12px"></span></button>
       <button class="ghost" onclick="show('screen-session')">Back</button>
     </div>
@@ -1125,6 +1126,7 @@
     <div class="card center stack">
       <h1>Queued ✓</h1>
       <p class="muted">Syncs automatically when online.</p>
+      <button class="primary" id="btn-add-another" onclick="addAnotherSameGroup()" style="display:none">➕ Add another item</button>
       <button class="primary" onclick="goScanAnother()">Scan another</button>
       <button class="ghost" onclick="goHome()">Home</button>
     </div>
@@ -1291,6 +1293,20 @@
       <div class="err-line" id="te-err"></div>
     </div>
   </div>
+
+  <!-- FINISH INCOMPLETE ITEMS (shelf / photo / categorise) -->
+  <section id="screen-finish" class="screen">
+    <div class="card">
+      <h1>🧩 Finish incomplete items</h1>
+      <p class="muted" style="font-size:13px"><span data-team-display>—</span> · Items missing a <strong>shelf</strong> or a <strong>photo</strong>. Walk each one, set where it lives and snap a photo. Skip moves it to the back of the queue.</p>
+      <div id="finish-progress" class="muted" style="font-size:13px;margin-top:4px"></div>
+    </div>
+    <div id="finish-card" class="card stack"></div>
+    <div class="card stack">
+      <button class="ghost" onclick="loadFinishList()">Refresh list</button>
+      <button class="ghost" onclick="goHome()">Back home</button>
+    </div>
+  </section>
 
   <!-- PHOTO LIGHTBOX -->
   <div id="photo-lightbox" class="photo-lightbox" onclick="closePhotoLightbox(event)">
@@ -1570,6 +1586,10 @@ async function postEnvelope(env){
 function show(id){
   document.querySelectorAll('.screen').forEach(el=>el.classList.remove('active'));
   const el=document.getElementById(id); if(el) el.classList.add('active');
+  // The success screen's "Add another" button is only meaningful right
+  // after registering a new item — hide it on every navigation, then the
+  // register flow re-shows it when it lands on the success screen.
+  const bAdd=document.getElementById('btn-add-another'); if(bAdd) bAdd.style.display='none';
   window.scrollTo(0,0); renderShelfBanners();
 }
 
@@ -1746,6 +1766,7 @@ function startMode(mode){
   else if(mode==='create'){show('screen-create-setup');}
   else if(mode==='return'){show('screen-return-picker'); loadReturnableJobs();}
   else if(mode==='triage'){show('screen-triage'); loadTriageList();}
+  else if(mode==='finish'){show('screen-finish'); loadFinishList();}
 }
 function submitLoadoutSetup(){
   const jobName=(document.getElementById('loadout-job')||{}).value?.trim();
@@ -2232,6 +2253,178 @@ async function triageSubmit_(it, decision, comment){
     // "All done" / "Saving last N…" state flips correctly.
     if (!_triageQueue.length) renderTriage();
   }
+}
+
+/* ---------- Finish incomplete items (shelf / photo / categorise) ----------
+   Same one-at-a-time card model as triage, but instead of a Keep/Delete
+   vote the user fills the gaps: shelf, photo, plus brand/type/qty/notes
+   if they want to tidy up while they're there. Server-side queuedItems
+   decides what belongs here (blank shelf OR no photo); the client just
+   walks the list. Each save posts a single 'completeItem' action.
+*/
+let _finishQueue = [];
+let _finishDone = [];      // rowIdx values finished this session
+let _finishInflight = 0;
+
+async function loadFinishList(){
+  const card = document.getElementById('finish-card');
+  const prog = document.getElementById('finish-progress');
+  if (card) card.innerHTML = '<div class="muted">Loading…</div>';
+  if (prog) prog.textContent = '';
+  try {
+    const url = ENDPOINT + '?action=queuedItems&_=' + Date.now();
+    const res = await fetch(url, { method:'GET' });
+    const data = await res.json();
+    if (!data || data.success === false){
+      if (card) card.innerHTML = '<div class="err-line">'+_esc((data&&data.error)||'Could not load list')+'</div>';
+      return;
+    }
+    // Drop anything we've already finished this session (in case the
+    // server list is momentarily stale after a save).
+    _finishQueue = (data.items || []).filter(it => _finishDone.indexOf(it.rowIdx) === -1);
+    updateFinishBadge(_finishQueue.length);
+    renderFinish();
+  } catch(_){
+    if (card) card.innerHTML = '<div class="err-line">Network error. Tap Refresh.</div>';
+  }
+}
+
+function updateFinishProgress(){
+  const prog = document.getElementById('finish-progress');
+  if (!prog) return;
+  const parts = [];
+  if (_finishQueue.length) parts.push(_finishQueue.length + ' to go');
+  if (_finishInflight)     parts.push('saving ' + _finishInflight + '…');
+  prog.textContent = parts.join(' · ');
+}
+
+function renderFinish(){
+  const card = document.getElementById('finish-card');
+  if (!card) return;
+  // Each item starts with a clean photo slot — the previous item's
+  // capture must not carry over onto the next row.
+  state.pendingPhoto = null;
+  if (!_finishQueue.length){
+    card.innerHTML = `<div class="center stack">
+        <h2>All caught up ✓</h2>
+        <p class="muted">Every item has a shelf and a photo.</p>
+        <button class="ghost" onclick="loadFinishList()">Refresh</button>
+      </div>`;
+    updateFinishProgress();
+    return;
+  }
+  updateFinishProgress();
+  const it = _finishQueue[0];
+  const esc = _esc;
+  const need = [];
+  if (it.needsShelf) need.push('<span class="pill pill-warn">No shelf</span>');
+  if (it.needsPhoto) need.push('<span class="pill pill-warn">No photo</span>');
+  const meta = [];
+  if (it.city) meta.push(esc(it.city));
+  if (it.status) meta.push(esc(it.status));
+  const photoHtml = it.thumbUrl
+    ? `<img class="triage-photo" src="${esc(it.thumbUrl)}" alt=""
+            onclick="openPhotoLightbox('${esc(it.thumbUrl)}','${esc(it.name||'')}')"
+            onerror="this.outerHTML='<div class=&quot;triage-photo empty&quot;></div>'"/>`
+    : `<div class="triage-photo empty"></div>`;
+  card.innerHTML = `
+    ${photoHtml}
+    <div class="triage-name">${esc(it.name||'(no name)')}</div>
+    <div class="triage-meta">${need.join(' ')}${meta.length ? ' · ' + meta.join(' · ') : ''}</div>
+    <div class="field"><label>Shelf</label>
+      <input id="fin-shelf" type="text" value="${esc(it.shelf||'')}" placeholder="e.g. D3" oninput="this.value=this.value.toUpperCase()"/></div>
+    <div class="field"><label>Brand</label>
+      <div class="type-picker" id="fin-brand"></div></div>
+    <div class="field"><label>Type</label>
+      <div class="type-picker" id="fin-type"></div></div>
+    <div class="field"><label>Total qty</label>
+      <input id="fin-qty" type="number" min="0" step="1" value="${Number(it.totalQty)||0}"/></div>
+    <div class="field"><label>Notes</label>
+      <textarea id="fin-notes">${esc(it.notes||'')}</textarea></div>
+    <div class="field"><label>Photo</label>
+      <input type="file" accept="image/*" capture="environment" onchange="handlePhotoInput(event,'fin-photo')"/>
+      <img id="fin-photo" class="photo-preview"/></div>
+    <div class="triage-actions">
+      <button class="primary" onclick="finishSave()">Save &amp; next</button>
+      <button class="ghost" onclick="finishSkip()">Skip</button>
+    </div>
+    <div class="err-line" id="fin-err"></div>`;
+  buildListPicker('fin-brand', 'brands', it.brand || '');
+  buildListPicker('fin-type',  'types',  it.type  || '');
+}
+
+function finishSkip(){
+  if (!_finishQueue.length) return;
+  if (_finishQueue.length > 1){
+    const head = _finishQueue.shift();
+    _finishQueue.push(head);
+  }
+  renderFinish();
+}
+
+async function finishSave(){
+  const it = _finishQueue[0]; if (!it) return;
+  const errEl = document.getElementById('fin-err');
+  if (errEl) errEl.textContent = '';
+  if (listPickerHasUnfilledNew('fin-brand')){ if(errEl) errEl.textContent='Type the new brand name first.'; return; }
+  if (listPickerHasUnfilledNew('fin-type')){  if(errEl) errEl.textContent='Type the new category name first.'; return; }
+  const shelf = ((document.getElementById('fin-shelf')||{}).value||'').trim().toUpperCase();
+  const brand = getListPickerValue('fin-brand');
+  const type  = getListPickerValue('fin-type');
+  const qtyStr= (document.getElementById('fin-qty')||{}).value;
+  const notes = (document.getElementById('fin-notes')||{}).value || '';
+  const photo = state.pendingPhoto?.dataUrl || '';
+  // Enforce the two gaps this queue exists for.
+  if (it.needsShelf && !shelf){ if(errEl) errEl.textContent="Add a shelf — that's why it's in the list."; return; }
+  if (it.needsPhoto && !photo && !it.thumbUrl){ if(errEl) errEl.textContent="Take a photo — that's why it's in the list."; return; }
+  const btn = document.querySelector('#finish-card button[onclick="finishSave()"]');
+  if (btn) btn.disabled = true;
+  _finishInflight++; updateFinishProgress();
+  try {
+    const payload = Object.assign({
+      rowIdx:   it.rowIdx,
+      name:     it.name || '',
+      brand:    brand,
+      type:     type,
+      totalQty: qtyStr === '' ? '' : (Number(qtyStr) || 0),
+      newShelf: shelf,
+      notes:    notes,
+      photo:    photo,
+      team:     state.team || '',
+      ts:       nowIso()
+    }, gpsPayload());
+    const res = await directPost('completeItem', payload);
+    if (!res || res.success === false){
+      if (errEl) errEl.textContent = (res && res.error) || 'Could not save';
+      return;
+    }
+    _finishDone.push(it.rowIdx);
+    _finishQueue.shift();
+    state.pendingPhoto = null;
+    invalidateListCache();          // a new brand/type may have been added
+    updateFinishBadge(_finishQueue.length);
+    toast('Saved ✓');
+    renderFinish();
+  } catch(_){
+    if (errEl) errEl.textContent = 'Network error — try again.';
+  } finally {
+    _finishInflight--; updateFinishProgress();
+    if (btn) btn.disabled = false;
+  }
+}
+
+function updateFinishBadge(count){
+  const el = document.getElementById('finish-badge');
+  if (!el) return;
+  el.textContent = count > 0 ? '(' + count + ')' : '';
+}
+async function refreshFinishBadge(){
+  try {
+    const url = ENDPOINT + '?action=queuedItems&_=' + Date.now();
+    const res = await fetch(url, { method:'GET', cache:'no-store' });
+    const data = await res.json();
+    if (data && data.success) updateFinishBadge(data.count || 0);
+  } catch (_) {}
 }
 
 /* ---------- Create-Order flow ----------
@@ -3472,6 +3665,47 @@ async function registerItem(payload, kind){
   }
 }
 
+/* ---------- Add another (keep the group's details) ----------
+   After registering, we stash the shelf/brand/type/qty/notes just used
+   and offer an "Add another item" button on the success screen. Tapping
+   it re-opens the same new-item form pre-filled with those values (all
+   editable), clearing only the Name and Photo — since items logged in a
+   batch usually share a shelf/brand but are individually named and
+   photographed. Covers both entry forms: the shelf-scan "new" form and
+   the tag-less "notag" form.
+*/
+let _lastNewItem = null;
+function rememberLastNewItem(screen, vals){
+  _lastNewItem = Object.assign({ screen: screen }, vals || {});
+}
+function revealAddAnother(){
+  const b = document.getElementById('btn-add-another');
+  if (b) b.style.display = _lastNewItem ? 'block' : 'none';
+}
+function addAnotherSameGroup(){
+  const last = _lastNewItem;
+  if (!last){ goScanAnother(); return; }
+  state.currentItem = null;
+  state.pendingPhoto = null;
+  const P = last.screen === 'notag' ? 'notag' : 'new';
+  const setV = (id, v) => { const e = document.getElementById(id); if (e) e.value = v; };
+  setV(P+'-shelf', last.shelf || '');
+  setV(P+'-name', '');                                   // fresh name each time
+  setV(P+'-qty', (last.totalQty != null ? last.totalQty : 1));
+  setV(P+'-notes', last.notes || '');
+  if (P === 'new'){
+    const d = document.getElementById('new-shelf-display'); if (d) d.textContent = last.shelf || '';
+  }
+  // Clear the photo preview + its retake footer so the next item is snapped fresh.
+  const pv = document.getElementById(P+'-photo'); if (pv){ pv.src = ''; pv.style.display = 'none'; }
+  const pf = document.getElementById(P+'-photo-footer'); if (pf) pf.remove();
+  // Rebuild the brand/type pickers pre-selected to the kept values.
+  buildListPicker(P+'-brand', 'brands', last.brand || 'Funkified');
+  buildListPicker(P+'-type',  'types',  last.type  || '');
+  show('screen-'+P);
+  const nm = document.getElementById(P+'-name'); if (nm) nm.focus();
+}
+
 async function submitNew(){
   // FIX: double-submit guard — disable the submit button while the request is in flight
   const btn = document.querySelector('button[onclick="submitNew()"]');
@@ -3500,7 +3734,11 @@ async function submitNew(){
   // A fresh type may have been added — invalidate the cache so the
   // next dropdown shows it.
   invalidateListCache();
+  // Remember this entry so "Add another" can re-open the form pre-filled
+  // with the same shelf/brand/type/qty/notes (name + photo cleared).
+  rememberLastNewItem('new', { shelf, brand, type, totalQty:Number(totalQty)||0, notes });
   show('screen-success');
+  revealAddAnother();
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -3541,7 +3779,10 @@ async function submitNoTag(){
   ids.forEach(id=>{const el=document.getElementById(id); if(el)el.value=id==='notag-shelf' && getShelfBind() ? getShelfBind() : '';});
   const qtyEl=document.getElementById('notag-qty'); if(qtyEl)qtyEl.value=1;
   const photoEl=document.getElementById('notag-photo'); if(photoEl){photoEl.style.display='none';photoEl.src='';}
+  // Remember this entry so "Add another" can re-open the form pre-filled.
+  rememberLastNewItem('notag', { shelf, brand, type, totalQty:Number(totalQty)||0, notes });
   show('screen-success');
+  revealAddAnother();
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -4880,6 +5121,7 @@ async function refreshReturnsQueueBadge(){
 function refreshStorageBadges(){
   refreshReturnsQueueBadge();
   refreshWalkdownBadge();
+  refreshFinishBadge();
   refreshApproveBadge();
   refreshPackBadge();
 }
